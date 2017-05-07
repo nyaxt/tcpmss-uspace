@@ -19,3 +19,6 @@ then, run tcpmss-uspace as root:
 ```
 sudo ./tcpmss-uspace 0 1414
 ```
+
+## License
+tcpmss-uspace is provided under GPLv2 to match libnetfilter_queue.
