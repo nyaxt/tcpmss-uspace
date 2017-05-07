@@ -1,24 +1,26 @@
-// tcpmss-uspace
-// Copyright (C) 2017 Kouhei Ueno
-//
-// This program is free software; you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation; either version 2 of the License, or (at
-// your option) any later version.
-//
-// This program is distributed in the hope that it will be useful, but
-// WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-// General Public License for more details.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program; if not, write to the Free Software
-// Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307
-// USA.
-//
-// Based on nfqnl_test.c by libnetfilter_queue project
+/* tcpmss-uspace
+ * Copyright (C) 2017 Kouhei Ueno
+
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or (at
+ * your option) any later version.
+
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
+
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307
+ * USA.
+
+ * Based on nfqnl_test.c by libnetfilter_queue project
+ */
 
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <netinet/in.h>
@@ -30,6 +32,10 @@
 #include <errno.h>
 
 #include <libnetfilter_queue/libnetfilter_queue.h>
+
+int g_verbose = 0;
+int g_maxmss = 1412; /* max mss size to clamp to */
+#define dprintf if (g_verbose) printf
 
 void ip_checksum_add(uint32_t* tmp, const void* vdata, size_t count) {
   const uint8_t* data = (const uint8_t*)vdata;
@@ -53,80 +59,43 @@ uint16_t ip_checksum_finalize(uint32_t* tmp) {
   return ~(*tmp);
 }
 
-static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
+static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 	      struct nfq_data *nfa, void *cbuserdata)
 {
+  int ret;
 	uint32_t id = 0;
-	struct nfqnl_msg_packet_hdr *ph = nfq_get_msg_packet_hdr(nfa);
-	if (ph) {
-		id = ntohl(ph->packet_id);
-		printf("hw_protocol=0x%04x hook=%u id=%u ",
-			ntohs(ph->hw_protocol), ph->hook, id);
-	}
-
-	struct nfqnl_msg_packet_hw *hwph = nfq_get_packet_hw(nfa);
-	if (hwph) {
-		int i, hlen = ntohs(hwph->hw_addrlen);
-
-		printf("hw_src_addr=");
-		for (i = 0; i < hlen-1; i++)
-			printf("%02x:", hwph->hw_addr[i]);
-		printf("%02x ", hwph->hw_addr[hlen-1]);
-	}
-
-	uint32_t mark = nfq_get_nfmark(nfa);
-	if (mark)
-		printf("mark=%u ", mark);
-
-	uint32_t ifi = nfq_get_indev(nfa);
-	if (ifi)
-		printf("indev=%u ", ifi);
-
-	ifi = nfq_get_outdev(nfa);
-	if (ifi)
-		printf("outdev=%u ", ifi);
-	ifi = nfq_get_physindev(nfa);
-	if (ifi)
-		printf("physindev=%u ", ifi);
-
-	ifi = nfq_get_physoutdev(nfa);
-	if (ifi)
-		printf("physoutdev=%u ", ifi);
 
   uint8_t* data;
 	int payload_len = nfq_get_payload(nfa, &data);
-	if (payload_len >= 0)
-		printf("payload_len=%d ", payload_len);
-
-  if (payload_len >= sizeof(struct iphdr)) {
+  if (payload_len < sizeof(struct iphdr)) {
+    ret = nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+  } else {
     struct iphdr* iph = (struct iphdr*)(data);
-    printf("ip version %u len %u proto %u csum %u ", iph->version, iph->ihl, iph->protocol, iph->check);
+    dprintf("ip version %u len %u proto %u csum %u ", iph->version, iph->ihl, iph->protocol, iph->check);
 
     if (iph->protocol == IPPROTO_TCP && payload_len >= (iph->ihl*4) + sizeof(struct tcphdr)) {
       struct tcphdr* tcph = (struct tcphdr*)(data + (iph->ihl*4));
-      printf("dst port=%u data_offset=%u syn=%u ", ntohs(tcph->dest), tcph->doff, tcph->syn);
+      dprintf("dst port=%u data_offset=%u syn=%u ", ntohs(tcph->dest), tcph->doff, tcph->syn);
       uint8_t *popt = (uint8_t*)(tcph) + 20;
       uint8_t *pend = data + (iph->ihl + tcph->doff)*4;
       while (popt < pend) {
         uint8_t kind = *popt++;
-        printf("opt[kind=%u ", kind);
+        dprintf("opt[kind=%u ", kind);
         if (kind >= 2) {
           uint8_t len = *popt++ - 2;
-          printf("len=%u ", len);
+          dprintf("len=%u ", len);
           if (kind == TCPOPT_MAXSEG && len == TCPOLEN_MAXSEG-2) {
             uint16_t maxseg = ntohs(*(uint16_t*)popt);
-            printf("maxseg=%u ", maxseg);
-            if (maxseg > 1414)
-              maxseg = 1414;
-            *(uint16_t*)popt = htons(maxseg);
-          } else if (kind == TCPOPT_WINDOW && len == TCPOLEN_WINDOW-2) {
-            printf("wscale=%u ", *popt);
-          } else for (int i = 0; i < len; ++ i) {
-            printf("%02x ", popt[i]);
+            dprintf("maxseg=%u ", maxseg);
+            if (maxseg > g_maxmss) {
+              dprintf("-> %u ", g_maxmss);
+              maxseg = g_maxmss;
+              *(uint16_t*)popt = htons(maxseg);
+            }
           }
           popt += len;
         }
-        printf("] ");
+        dprintf("] ");
       }
 
       // recompute tcp csum
@@ -146,11 +115,16 @@ static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
       }
       tcph->check = mycsum;
     }
+    ret = nfq_set_verdict(qh, id, NF_ACCEPT, payload_len, data);
   }
+  dprintf("\n");
 
-	fputc('\n', stdout);
+  return ret;
+}
 
-	return nfq_set_verdict(qh, id, NF_ACCEPT, payload_len, data);
+void help(const char* argv0) {
+  fprintf(stderr, "Usage: %s [-v] queue_id maxmss\n", argv0);
+  exit(EXIT_FAILURE);
 }
 
 int main(int argc, char **argv)
@@ -162,13 +136,23 @@ int main(int argc, char **argv)
 	uint32_t queue = 0;
 	char buf[4096] __attribute__ ((aligned));
 
-	if (argc == 2) {
-		queue = atoi(argv[1]);
-		if (queue > 65535) {
-			fprintf(stderr, "Usage: %s [<0-65535>]\n", argv[0]);
-			exit(EXIT_FAILURE);
-		}
-	}
+  const char* argv0 = argv[0];
+  argv++; argc--;
+
+  if (argc > 1 && strcmp("-v", argv[0]) == 0) {
+    g_verbose = 1; 
+    argv++; argc--;
+  }
+
+	if (argc != 2)
+    help(argv0);
+
+  queue = atoi(argv[0]);
+  if (queue > 65535)
+    help(argv0);
+
+  g_maxmss = atoi(argv[1]);
+	printf("queue id: %d, maxmss: %d\n", queue, g_maxmss);
 
 	printf("opening library handle\n");
 	h = nfq_open();
@@ -190,7 +174,7 @@ int main(int argc, char **argv)
 	}
 
 	printf("binding this socket to queue '%d'\n", queue);
-	qh = nfq_create_queue(h, queue, &cb, NULL);
+	qh = nfq_create_queue(h, queue, &packet_callback, NULL);
 	if (!qh) {
 		fprintf(stderr, "error during nfq_create_queue()\n");
 		exit(1);
@@ -208,7 +192,7 @@ int main(int argc, char **argv)
 
 	for (;;) {
 		if ((rv = recv(fd, buf, sizeof(buf), 0)) >= 0) {
-			printf("pkt received\n");
+			dprintf("pkt received\n");
 			nfq_handle_packet(h, buf, rv);
 			continue;
 		}
@@ -220,7 +204,7 @@ int main(int argc, char **argv)
 		 * this situation.
 		 */
 		if (rv < 0 && errno == ENOBUFS) {
-			printf("losing packets!\n");
+			dprintf("losing packets!\n");
 			continue;
 		}
 		perror("recv failed");
