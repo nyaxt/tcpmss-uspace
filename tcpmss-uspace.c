@@ -96,11 +96,9 @@ static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
           if (kind == TCPOPT_MAXSEG && len == TCPOLEN_MAXSEG-2) {
             uint16_t maxseg = ntohs(*(uint16_t*)popt);
             printf("maxseg=%u ", maxseg);
-#if 0
             if (maxseg > 1414)
               maxseg = 1414;
-            *(uint16_t)popt = htons(maxseg);
-#endif
+            *(uint16_t*)popt = htons(maxseg);
           } else if (kind == TCPOPT_WINDOW && len == TCPOLEN_WINDOW-2) {
             printf("wscale=%u ", *popt);
           } else for (int i = 0; i < len; ++ i) {
@@ -112,26 +110,21 @@ static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
       }
 
       // recompute tcp csum
-      uint16_t orig_csum = tcph->check; tcph->check = 0;
+      tcph->check = 0;
       uint16_t mycsum;
       {
         uint32_t tmp = 0;
         ip_checksum_add(&tmp, &iph->saddr, 4);
         ip_checksum_add(&tmp, &iph->daddr, 4);
-        /*
-        static const uint8_t zero = 0;
-        ip_checksum_add(&tmp, &zero, 1);
-        */
-        static const uint8_t proto = IPPROTO_TCP;
-        ip_checksum_add(&tmp, &proto, 1);
+        static const uint16_t zeroproto = IPPROTO_TCP << 8;
+        ip_checksum_add(&tmp, &zeroproto, 2);
         uint16_t len = ntohs(iph->tot_len) - iph->ihl*4;
         uint16_t nlen = htons(len);
         ip_checksum_add(&tmp, &nlen, 2);
         ip_checksum_add(&tmp, tcph, len);
         mycsum = ip_checksum_finalize(&tmp);
       }
-      tcph->check = orig_csum;
-      printf("csum %02x==%02x diff %d ", orig_csum, mycsum, orig_csum - mycsum);
+      tcph->check = mycsum;
     }
   }
 
