@@ -1,2 +1,2 @@
-tcpmss-uspace:
-	clang -o tcpmss-uspace -lmnl -lnetfilter_queue tcpmss-uspace.c
+tcpmss-uspace: tcpmss-uspace.c
+	clang -g -o tcpmss-uspace -lmnl -lnetfilter_queue tcpmss-uspace.c

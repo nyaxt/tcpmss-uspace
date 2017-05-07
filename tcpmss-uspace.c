@@ -1,32 +1,50 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
+#include <netinet/ether.h>
 #include <linux/types.h>
 #include <linux/netfilter.h>		/* for NF_ACCEPT */
 #include <errno.h>
 
 #include <libnetfilter_queue/libnetfilter_queue.h>
 
+void ip_checksum_add(uint32_t* tmp, const void* vdata, size_t count) {
+  const uint8_t* data = (const uint8_t*)vdata;
+  while( count > 1 )  {
+    *tmp += *(uint16_t*)data;
+    data += 2;
+    count -= 2;
+
+    while (*tmp>>16)
+      *tmp = (*tmp & 0xffff) + (*tmp >> 16);
+  }
+
+  if(count > 0)
+    *tmp += *data;
+
+  while (*tmp>>16)
+    *tmp = (*tmp & 0xffff) + (*tmp >> 16);
+}
+
+uint16_t ip_checksum_finalize(uint32_t* tmp) {
+  return ~(*tmp);
+}
+
 static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 	      struct nfq_data *nfa, void *cbuserdata)
 {
 	uint32_t id = 0;
-	struct nfqnl_msg_packet_hdr *ph;
-	struct nfqnl_msg_packet_hw *hwph;
-	uint32_t mark, ifi, uid, gid;
-	int ret;
-	unsigned char *data;
-
-	ph = nfq_get_msg_packet_hdr(nfa);
+	struct nfqnl_msg_packet_hdr *ph = nfq_get_msg_packet_hdr(nfa);
 	if (ph) {
 		id = ntohl(ph->packet_id);
 		printf("hw_protocol=0x%04x hook=%u id=%u ",
 			ntohs(ph->hw_protocol), ph->hook, id);
 	}
 
-	hwph = nfq_get_packet_hw(nfa);
+	struct nfqnl_msg_packet_hw *hwph = nfq_get_packet_hw(nfa);
 	if (hwph) {
 		int i, hlen = ntohs(hwph->hw_addrlen);
 
@@ -36,11 +54,11 @@ static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 		printf("%02x ", hwph->hw_addr[hlen-1]);
 	}
 
-	mark = nfq_get_nfmark(nfa);
+	uint32_t mark = nfq_get_nfmark(nfa);
 	if (mark)
 		printf("mark=%u ", mark);
 
-	ifi = nfq_get_indev(nfa);
+	uint32_t ifi = nfq_get_indev(nfa);
 	if (ifi)
 		printf("indev=%u ", ifi);
 
@@ -55,13 +73,71 @@ static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 	if (ifi)
 		printf("physoutdev=%u ", ifi);
 
-	ret = nfq_get_payload(nfa, &data);
-	if (ret >= 0)
-		printf("payload_len=%d ", ret);
+  uint8_t* data;
+	int payload_len = nfq_get_payload(nfa, &data);
+	if (payload_len >= 0)
+		printf("payload_len=%d ", payload_len);
+
+  if (payload_len >= sizeof(struct iphdr)) {
+    struct iphdr* iph = (struct iphdr*)(data);
+    printf("ip version %u len %u proto %u csum %u ", iph->version, iph->ihl, iph->protocol, iph->check);
+
+    if (iph->protocol == IPPROTO_TCP && payload_len >= (iph->ihl*4) + sizeof(struct tcphdr)) {
+      struct tcphdr* tcph = (struct tcphdr*)(data + (iph->ihl*4));
+      printf("dst port=%u data_offset=%u syn=%u ", ntohs(tcph->dest), tcph->doff, tcph->syn);
+      uint8_t *popt = (uint8_t*)(tcph) + 20;
+      uint8_t *pend = data + (iph->ihl + tcph->doff)*4;
+      while (popt < pend) {
+        uint8_t kind = *popt++;
+        printf("opt[kind=%u ", kind);
+        if (kind >= 2) {
+          uint8_t len = *popt++ - 2;
+          printf("len=%u ", len);
+          if (kind == TCPOPT_MAXSEG && len == TCPOLEN_MAXSEG-2) {
+            uint16_t maxseg = ntohs(*(uint16_t*)popt);
+            printf("maxseg=%u ", maxseg);
+#if 0
+            if (maxseg > 1414)
+              maxseg = 1414;
+            *(uint16_t)popt = htons(maxseg);
+#endif
+          } else if (kind == TCPOPT_WINDOW && len == TCPOLEN_WINDOW-2) {
+            printf("wscale=%u ", *popt);
+          } else for (int i = 0; i < len; ++ i) {
+            printf("%02x ", popt[i]);
+          }
+          popt += len;
+        }
+        printf("] ");
+      }
+
+      // recompute tcp csum
+      uint16_t orig_csum = tcph->check; tcph->check = 0;
+      uint16_t mycsum;
+      {
+        uint32_t tmp = 0;
+        ip_checksum_add(&tmp, &iph->saddr, 4);
+        ip_checksum_add(&tmp, &iph->daddr, 4);
+        /*
+        static const uint8_t zero = 0;
+        ip_checksum_add(&tmp, &zero, 1);
+        */
+        static const uint8_t proto = IPPROTO_TCP;
+        ip_checksum_add(&tmp, &proto, 1);
+        uint16_t len = ntohs(iph->tot_len) - iph->ihl*4;
+        uint16_t nlen = htons(len);
+        ip_checksum_add(&tmp, &nlen, 2);
+        ip_checksum_add(&tmp, tcph, len);
+        mycsum = ip_checksum_finalize(&tmp);
+      }
+      tcph->check = orig_csum;
+      printf("csum %02x==%02x diff %d ", orig_csum, mycsum, orig_csum - mycsum);
+    }
+  }
 
 	fputc('\n', stdout);
 
-	return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+	return nfq_set_verdict(qh, id, NF_ACCEPT, payload_len, data);
 }
 
 int main(int argc, char **argv)
@@ -140,13 +216,6 @@ int main(int argc, char **argv)
 
 	printf("unbinding from queue 0\n");
 	nfq_destroy_queue(qh);
-
-#ifdef INSANE
-	/* normally, applications SHOULD NOT issue this command, since
-	 * it detaches other programs/sockets from AF_INET, too ! */
-	printf("unbinding from AF_INET\n");
-	nfq_unbind_pf(h, AF_INET);
-#endif
 
 	printf("closing library handle\n");
 	nfq_close(h);
