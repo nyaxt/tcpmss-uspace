@@ -62,13 +62,20 @@ uint16_t ip_checksum_finalize(uint32_t* tmp) {
 static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 	      struct nfq_data *nfa, void *cbuserdata)
 {
-  int ret;
 	uint32_t id = 0;
+
+  /* somehow nfq_get_msg_packet_hdr call is required */
+  struct nfqnl_msg_packet_hdr *ph = nfq_get_msg_packet_hdr(nfa);
+  if (ph) {
+    id = ntohl(ph->packet_id);
+    dprintf("hw_protocol=0x%04x hook=%u id=%u ",
+        ntohs(ph->hw_protocol), ph->hook, id);
+  }
 
   uint8_t* data;
 	int payload_len = nfq_get_payload(nfa, &data);
   if (payload_len < sizeof(struct iphdr)) {
-    ret = nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
   } else {
     struct iphdr* iph = (struct iphdr*)(data);
     dprintf("ip version %u len %u proto %u csum %u ", iph->version, iph->ihl, iph->protocol, iph->check);
@@ -115,11 +122,11 @@ static int packet_callback(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
       }
       tcph->check = mycsum;
     }
-    ret = nfq_set_verdict(qh, id, NF_ACCEPT, payload_len, data);
+    nfq_set_verdict(qh, id, NF_ACCEPT, payload_len, data);
   }
   dprintf("\n");
 
-  return ret;
+  return 0;
 }
 
 void help(const char* argv0) {
@@ -192,7 +199,7 @@ int main(int argc, char **argv)
 
 	for (;;) {
 		if ((rv = recv(fd, buf, sizeof(buf), 0)) >= 0) {
-			dprintf("pkt received\n");
+			/* dprintf("pkt received\n"); */
 			nfq_handle_packet(h, buf, rv);
 			continue;
 		}
