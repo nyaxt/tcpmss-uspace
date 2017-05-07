@@ -1,0 +1,9 @@
+[Unit]
+Description=Start tcpmss-uspace service
+Before=nftables.service
+
+[Service]
+ExecStart=/home/kouhei/tcpmss-uspace/tcpmss-uspace 0 1414
+
+[Install]
+WantedBy=multi-user.target
