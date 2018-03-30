@@ -1,9 +1,10 @@
 # tcpmss-uspace.c
 
-tcpmss-uspace is TCPMSS iptables target equivalent in userspace.
+tcpmss-uspace is TCPMSS iptables target equivalent in userspace. Now that nftables have evolved to support clamping natively in Linux kernel 4.14, the original use case is obsolete.
+See [the article in nftables wiki](https://wiki.nftables.org/wiki-nftables/index.php/Mangle_TCP_options) for more details.
 
 ## Using tcpmss-uspace w/ nftables
-tcpmss-uspace can be used to clamp MSS on nftables env, where [xt TCPMSS is not yet supported (as of May 2017).](https://wiki.nftables.org/wiki-nftables/index.php/Supported_features_compared_to_xtables#tcpmss).
+tcpmss-uspace was originally made as a workaround to clamp MSS on nftables env.
 
 ### Sample nftables.conf:
 ```
